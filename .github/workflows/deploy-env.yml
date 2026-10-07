@@ -93,13 +93,14 @@ jobs:
             "Approved by ${GITHUB_ACTOR} in ${GITHUB_REPOSITORY}#${GITHUB_RUN_ID}"
 
   # -----------------------------------------------
-  # Rejected at the gate, or the pipeline was cancelled: discard the saved
-  # plan so the run history shows it was turned down, not left hanging.
+  # Rejected at the gate, a soft policy failure, or the pipeline was
+  # cancelled: discard the run so history shows it was turned down, not
+  # left hanging. The script no-ops if the run is already final.
   # -----------------------------------------------
   discard:
     name: "Discard (${{ inputs.environment }})"
     needs: [plan, apply]
-    if: always() && needs.plan.outputs.has_changes == 'true' && needs.apply.result != 'success'
+    if: always() && needs.plan.outputs.run_id != '' && needs.apply.result != 'success'
     runs-on: ubuntu-latest
 
     steps:

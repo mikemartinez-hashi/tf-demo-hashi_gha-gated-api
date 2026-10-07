@@ -205,7 +205,9 @@ cmd_apply() {
 cmd_discard() {
   local run_id=$1 comment=${2:-"Rejected in external pipeline"} status
   status=$(run_status "$run_id")
-  if [[ "$status" == "planned_and_saved" ]]; then
+  # Discardable states per the runs API - includes a run paused on a
+  # soft-mandatory policy failure (policy_override).
+  if [[ " planned planned_and_saved cost_estimated policy_checked policy_override post_plan_running post_plan_completed " == *" $status "* ]]; then
     api POST "/runs/$run_id/actions/discard" -d "$(jq -n --arg c "$comment" '{comment:$c}')" >/dev/null
     echo "discarded $run_id" >&2
   else
