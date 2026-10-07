@@ -1,0 +1,10 @@
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+*.tfvars
+# per-environment inputs are committed on purpose - they are the pipeline inputs
+!env/*.tfvars
+tfplan
+*.tar.gz
+.DS_Store

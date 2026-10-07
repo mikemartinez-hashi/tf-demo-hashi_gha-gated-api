@@ -1,0 +1,69 @@
+name: "Speculative Plan via API (PR)"
+
+# Plan-only run against the dev workspace on every PR to main, over the API.
+# Plan summary posts as a PR comment - nothing can be applied from this run.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**.tf"
+      - "env/**.tfvars"
+      - "user_data.sh"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  TFC_ORG: Mikes_sandbox
+  WORKSPACE: tf-demo-gated-api-dev
+
+jobs:
+  speculative-plan:
+    name: "Speculative Plan"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package configuration
+        run: |
+          mkdir -p build
+          cp ./*.tf user_data.sh build/
+          cp env/dev.tfvars build/environment.auto.tfvars
+
+      # The script writes its summary to a file here so we can reuse it as
+      # the PR comment.
+      - name: Speculative plan via API
+        id: plan
+        continue-on-error: true
+        env:
+          TFC_TOKEN: ${{ secrets.TF_API_TOKEN }}
+        run: |
+          GITHUB_STEP_SUMMARY=plan-summary.md \
+            bash ./scripts/tfc-api.sh speculative "$WORKSPACE" build \
+            "PR #${{ github.event.pull_request.number }} (${GITHUB_SHA::7})"
+
+      - name: Post Plan to PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let body = '';
+            try { body = fs.readFileSync('plan-summary.md', 'utf8'); } catch (e) {}
+            if (!body) body = '_No plan summary captured - check the workflow logs._';
+            body += `\n\n**Plan step:** \`${{ steps.plan.outcome }}\` - *triggered by @${{ github.actor }}*`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body.slice(0, 65000),
+            });
+
+      - name: Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

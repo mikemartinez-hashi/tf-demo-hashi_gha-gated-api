@@ -1,0 +1,46 @@
+name: "Deploy via API (gated dev -> qa -> prod)"
+
+# API-driven workflow: no `terraform` binary on the runner at all. Each stage
+# calls scripts/tfc-api.sh (curl + jq), which is exactly what a Jenkins stage
+# would call. GitHub Actions is only the orchestrator; the GitHub Environment
+# approval stands in for the release tool's "I've reviewed this plan" gate.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.tf"
+      - "env/**.tfvars"
+      - "user_data.sh"
+  workflow_dispatch:
+
+# One deploy pipeline at a time. A newer merge waits behind one that is
+# sitting at an approval gate instead of racing it.
+concurrency:
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dev:
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: dev
+    secrets: inherit
+
+  qa:
+    needs: dev
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: qa
+    secrets: inherit
+
+  prod:
+    needs: qa
+    uses: ./.github/workflows/deploy-env.yml
+    with:
+      environment: prod
+    secrets: inherit

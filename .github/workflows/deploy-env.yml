@@ -1,0 +1,114 @@
+name: "Deploy one environment (API)"
+
+# Reusable: plan -> gate -> apply for a single environment, over the API.
+#
+#   plan     upload config version (provisional) -> create run with save-plan=true
+#            -> wait for planned_and_saved (plan + Sentinel done, nothing applied)
+#   apply    [GitHub Environment approval] -> POST /runs/:id/actions/apply
+#   discard  if the approval is rejected or the pipeline is cancelled,
+#            POST /runs/:id/actions/discard so the run doesn't sit open
+#
+# Only the run ID crosses the gate - no plan file, no state, no credentials.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TFC_ORG: Mikes_sandbox
+  WORKSPACE: tf-demo-gated-api-${{ inputs.environment }}
+
+jobs:
+  plan:
+    name: "Plan (${{ inputs.environment }})"
+    runs-on: ubuntu-latest
+    outputs:
+      run_id: ${{ steps.plan.outputs.run_id }}
+      run_url: ${{ steps.plan.outputs.run_url }}
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------
+      # Build the upload directory. The API has no -var-file, so the
+      # environment's tfvars ships inside the config as *.auto.tfvars.
+      # Note: *.auto.tfvars has LOWER precedence than workspace variables,
+      # so don't also set these keys on the workspace.
+      # -----------------------------------------------
+      - name: Package configuration
+        run: |
+          mkdir -p build
+          cp ./*.tf user_data.sh build/
+          cp "env/${{ inputs.environment }}.tfvars" build/environment.auto.tfvars
+          ls -la build
+
+      # Provenance values go in as run-specific variables (same precedence
+      # as -var on the CLI). Values are HCL, so strings carry inner quotes.
+      - name: Saved plan via API
+        id: plan
+        env:
+          TFC_TOKEN: ${{ secrets.TF_API_TOKEN }}
+        run: |
+          export RUN_VARS_JSON=$(jq -nc \
+            --arg id "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" \
+            --arg actor "$GITHUB_ACTOR" --arg repo "$GITHUB_REPOSITORY" \
+            '[{key:"github_run_id",     value:($id|tojson)},
+              {key:"github_sha",        value:($sha|tojson)},
+              {key:"github_actor",      value:($actor|tojson)},
+              {key:"github_repository", value:($repo|tojson)}]')
+          bash ./scripts/tfc-api.sh plan "$WORKSPACE" build \
+            "GHA ${GITHUB_REPOSITORY}#${GITHUB_RUN_ID} (${GITHUB_SHA::7}) - ${{ inputs.environment }}"
+
+  # -----------------------------------------------
+  # The gate. `environment:` pauses this job until a required reviewer
+  # approves it in GitHub. The environment URL links straight to the
+  # HCP Terraform run the reviewer is approving.
+  # -----------------------------------------------
+  apply:
+    name: "Apply (${{ inputs.environment }})"
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ needs.plan.outputs.run_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Confirm saved plan via API
+        env:
+          TFC_TOKEN: ${{ secrets.TF_API_TOKEN }}
+        run: |
+          bash ./scripts/tfc-api.sh apply "${{ needs.plan.outputs.run_id }}" \
+            "Approved by ${GITHUB_ACTOR} in ${GITHUB_REPOSITORY}#${GITHUB_RUN_ID}"
+
+  # -----------------------------------------------
+  # Rejected at the gate, or the pipeline was cancelled: discard the saved
+  # plan so the run history shows it was turned down, not left hanging.
+  # -----------------------------------------------
+  discard:
+    name: "Discard (${{ inputs.environment }})"
+    needs: [plan, apply]
+    if: always() && needs.plan.outputs.has_changes == 'true' && needs.apply.result != 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Discard saved plan via API
+        env:
+          TFC_TOKEN: ${{ secrets.TF_API_TOKEN }}
+        run: |
+          bash ./scripts/tfc-api.sh discard "${{ needs.plan.outputs.run_id }}" \
+            "Not approved in ${GITHUB_REPOSITORY}#${GITHUB_RUN_ID}"
